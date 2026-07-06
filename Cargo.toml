@@ -1,0 +1,8 @@
+[package]
+name = "convection"
+version = "0.1.0"
+authors = ["Nicolas Frey <nicolas.theo.frey@gmail.com>", "Angelo Wang <angelo.fu.wang@gmail.com"]
+edition = "2024"
+readme = "README.md"
+
+[dependencies]
