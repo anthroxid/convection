@@ -1,5 +1,6 @@
 alias b := build
 alias r := run
+alias t := test
 
 default: check build test
 

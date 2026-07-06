@@ -5,4 +5,29 @@ authors = ["Nicolas Frey <nicolas.theo.frey@gmail.com>", "Angelo Wang <angelo.fu
 edition = "2024"
 readme = "README.md"
 
+[[bin]]
+name = "convection-gui"
+path = "src/convection-gui.rs"
+
+[workspace]
+members = [
+  "render"
+]
+
+[workspace.dependencies]
+render = { path = "./render" }
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "serde",
+    "wgsl",
+    "vulkan",
+    "gles",
+    "dx12",
+    "metal",
+    "vulkan-portability",
+    "angle",
+    "static-dxc",
+] }
+
 [dependencies]
+render.workspace = true

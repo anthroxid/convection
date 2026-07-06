@@ -1,0 +1,23 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+winit = "0.30"
+pollster = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
+wgpu = { workspace = true, features = ["trace"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_log = "1"
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+web-sys = "0.3"
+wgpu = { workspace = true, default-features = false, features = [
+    "wgsl",
+    "std",
+    "trace",
+] }
