@@ -9,13 +9,19 @@ readme = "README.md"
 name = "convection-gui"
 path = "src/convection-gui.rs"
 
+[[bin]]
+name = "copernicus-test"
+path = "src/copernicus-test.rs"
+
 [workspace]
 members = [
-  "render"
+  "render",
+  "copernicus-core"
 ]
 
 [workspace.dependencies]
 render = { path = "./render" }
+copernicus-core = { path = "./copernicus-core" }
 wgpu = { version = "30", default-features = false, features = [
     "std",
     "serde",
@@ -28,6 +34,14 @@ wgpu = { version = "30", default-features = false, features = [
     "angle",
     "static-dxc",
 ] }
+ndarray = "0.17"
+anyhow = "1"
+serde = "1"
+serde_json = "1"
+eccodes = "0.14"
+reqwest = "0.13.4"
 
 [dependencies]
 render.workspace = true
+copernicus-core.workspace = true
+anyhow.workspace = true
