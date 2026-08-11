@@ -1,7 +1,6 @@
+use convection_types::BBox;
 use serde::Serialize;
 use serde_json::Value;
-
-use crate::types::BBox;
 
 // https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Evalscript/V3.html
 // https://sh.dataspace.copernicus.eu/process/v1
