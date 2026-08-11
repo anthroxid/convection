@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 anyhow.workspace = true
 reqwest = { workspace = true, features = ["blocking", "form", "json"] }
 eccodes.workspace = true
+convection_types.workspace = true

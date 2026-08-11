@@ -1,0 +1,187 @@
+use std::f64::consts::PI;
+
+use convection_types::BBox;
+use image::RgbaImage;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tile {
+    zoom: u32,
+    x: u32,
+    y: u32,
+}
+
+impl Tile {
+    pub fn new(zoom: u32, x: u32, y: u32) -> Self {
+        Self { zoom, x, y }
+    }
+
+    pub fn zoom(&self) -> u32 {
+        self.zoom
+    }
+
+    pub fn x(&self) -> u32 {
+        self.x
+    }
+
+    pub fn y(&self) -> u32 {
+        self.y
+    }
+
+    pub fn xy(&self) -> (u32, u32) {
+        (self.x, self.y)
+    }
+
+    /// validate against a scheme's matrix dimensions at this tile's zoom
+    pub fn is_valid_for(&self, scheme: &impl TilingScheme) -> bool {
+        let (cols, rows) = scheme.matrix_dims(self.zoom);
+        self.x < cols && self.y < rows
+    }
+
+    /// flip the y-axis (XYZ <-> TMS conversion) given a scheme's row count at this zoom
+    pub fn flip_y(&self, scheme: &impl TilingScheme) -> Tile {
+        let (_, rows) = scheme.matrix_dims(self.zoom);
+        Tile::new(self.zoom, self.x, rows - 1 - self.y)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TileImage {
+    tile: Tile,
+    image: RgbaImage,
+}
+
+impl TileImage {
+    pub fn new(tile: Tile, image: RgbaImage) -> Self {
+        Self { tile, image }
+    }
+
+    pub fn tile(&self) -> Tile {
+        self.tile
+    }
+
+    pub fn image(&self) -> &RgbaImage {
+        &self.image
+    }
+
+    pub fn pixel_dimensions(&self) -> (u32, u32) {
+        self.image.dimensions()
+    }
+}
+
+pub trait TilingScheme {
+    fn id(&self) -> &'static str;
+
+    /// tile edge length in pixels (e.g. 256, 512)
+    fn tile_size(&self) -> u32;
+
+    /// (columns, rows) of the tile matrix at a given zoom.
+    /// not promised to be square (see WGS84 level 0 zoom)
+    fn matrix_dims(&self, zoom: u32) -> (u32, u32);
+
+    fn tile_for_lonlat(&self, lon: f64, lat: f64, zoom: u32) -> Tile;
+
+    fn bounds(&self, tile: Tile) -> BBox;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WebMercatorScheme {
+    pub tile_size: u32,
+}
+
+impl Default for WebMercatorScheme {
+    fn default() -> Self {
+        Self { tile_size: 256 }
+    }
+}
+
+impl TilingScheme for WebMercatorScheme {
+    fn id(&self) -> &'static str {
+        "GoogleMapsCompatible"
+    }
+
+    fn tile_size(&self) -> u32 {
+        self.tile_size
+    }
+
+    fn matrix_dims(&self, zoom: u32) -> (u32, u32) {
+        let n = 1u32 << zoom;
+        (n, n)
+    }
+
+    fn tile_for_lonlat(&self, lon: f64, lat: f64, zoom: u32) -> Tile {
+        let n = (1u32 << zoom) as f64;
+        let lat = lat.clamp(-85.051_128_78, 85.051_128_78); // Web Mercator's valid range
+        let lon = ((lon + 180.0).rem_euclid(360.0)) - 180.0; // normalize antimeridian wraparound
+
+        let x = ((lon + 180.0) / 360.0 * n).floor() as u32;
+        let lat_rad = lat.to_radians();
+        let y = ((1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / PI) / 2.0 * n).floor() as u32;
+
+        Tile::new(zoom, x.min(n as u32 - 1), y.min(n as u32 - 1))
+    }
+
+    fn bounds(&self, tile: Tile) -> BBox {
+        let n = (1u32 << tile.zoom()) as f64;
+        let west = tile.x() as f64 / n * 360.0 - 180.0;
+        let east = (tile.x() as f64 + 1.0) / n * 360.0 - 180.0;
+
+        let lat_of = |y: f64| {
+            let val = std::f64::consts::PI * (1.0 - 2.0 * y / n);
+            val.sinh().atan().to_degrees()
+        };
+
+        BBox::new(
+            west,
+            lat_of(tile.y() as f64 + 1.0),
+            east,
+            lat_of(tile.y() as f64),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Wgs84Scheme {
+    pub tile_size: u32,
+}
+
+impl Default for Wgs84Scheme {
+    fn default() -> Self {
+        Self { tile_size: 256 }
+    }
+}
+
+impl TilingScheme for Wgs84Scheme {
+    fn id(&self) -> &'static str {
+        "WGS84"
+    }
+
+    fn tile_size(&self) -> u32 {
+        self.tile_size
+    }
+
+    fn matrix_dims(&self, zoom: u32) -> (u32, u32) {
+        // 360deg wide / 180deg tall, twice as many columns as rows
+        let rows = 1u32 << zoom;
+        (rows * 2, rows)
+    }
+
+    fn tile_for_lonlat(&self, lon: f64, lat: f64, zoom: u32) -> Tile {
+        let (cols, rows) = self.matrix_dims(zoom);
+        let lon = ((lon + 180.0).rem_euclid(360.0)) - 180.0;
+        let lat = lat.clamp(-90.0, 90.0);
+
+        let x = ((lon + 180.0) / 360.0 * cols as f64).floor() as u32;
+        let y = ((90.0 - lat) / 180.0 * rows as f64).floor() as u32;
+
+        Tile::new(zoom, x.min(cols - 1), y.min(rows - 1))
+    }
+
+    fn bounds(&self, tile: Tile) -> BBox {
+        let (cols, rows) = self.matrix_dims(tile.zoom());
+        let west = tile.x() as f64 / cols as f64 * 360.0 - 180.0;
+        let east = (tile.x() as f64 + 1.0) / cols as f64 * 360.0 - 180.0;
+        let north = 90.0 - tile.y() as f64 / rows as f64 * 180.0;
+        let south = 90.0 - (tile.y() as f64 + 1.0) / rows as f64 * 180.0;
+        BBox::new(west, south, east, north)
+    }
+}

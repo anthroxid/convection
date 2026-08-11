@@ -16,12 +16,16 @@ path = "src/copernicus-test.rs"
 [workspace]
 members = [
   "render",
-  "copernicus-core"
+  "copernicus-core",
+  "tiling",
+  "convection_types"
 ]
 
 [workspace.dependencies]
 render = { path = "./render" }
 copernicus-core = { path = "./copernicus-core" }
+tiling = { path = "./tiling" }
+convection_types = { path = "./convection_types" }
 wgpu = { version = "30", default-features = false, features = [
     "std",
     "serde",
@@ -40,6 +44,7 @@ serde = "1"
 serde_json = "1"
 eccodes = "0.14"
 reqwest = "0.13.4"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 
 [dependencies]
 render.workspace = true
