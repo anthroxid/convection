@@ -1,8 +1,7 @@
+use convection_types::BBox;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-
-use crate::types::BBox;
 
 /// builder for a STAC API `POST /search` request body.
 ///
