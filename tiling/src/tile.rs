@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use convection_types::BBox;
+use convection_types::{BBox, Distance};
 use image::RgbaImage;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,6 +42,28 @@ impl Tile {
         let (_, rows) = scheme.matrix_dims(self.zoom);
         Tile::new(self.zoom, self.x, rows - 1 - self.y)
     }
+
+    /// the four child tiles at zoom+1. valid for any scheme whose matrix
+    /// dimensions double per zoom level
+    pub fn children(&self) -> [Tile; 4] {
+        let z = self.zoom + 1;
+        let x = self.x * 2;
+        let y = self.y * 2;
+        [
+            Tile::new(z, x, y),
+            Tile::new(z, x + 1, y),
+            Tile::new(z, x, y + 1),
+            Tile::new(z, x + 1, y + 1),
+        ]
+    }
+
+    pub fn parent(&self) -> Option<Tile> {
+        if self.zoom == 0 {
+            None
+        } else {
+            Some(Tile::new(self.zoom - 1, self.x / 2, self.y / 2))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -81,6 +103,18 @@ pub trait TilingScheme {
     fn tile_for_lonlat(&self, lon: f64, lat: f64, zoom: u32) -> Tile;
 
     fn bounds(&self, tile: Tile) -> BBox;
+
+    fn root_tiles(&self) -> Vec<Tile> {
+        let (cols, rows) = self.matrix_dims(0);
+        (0..rows)
+            .flat_map(|y| (0..cols).map(move |x| Tile::new(0, x, y)))
+            .collect()
+    }
+
+    fn approx_tile_size(&self, zoom: u32) -> Distance {
+        let (cols, _) = self.matrix_dims(zoom);
+        convection_types::EARTH_CIRCUMFERENCE / cols as f64
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
