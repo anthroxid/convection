@@ -18,14 +18,14 @@ members = [
   "render",
   "copernicus-core",
   "tiling",
-  "convection_types"
+  "convection-types"
 ]
 
 [workspace.dependencies]
 render = { path = "./render" }
 copernicus-core = { path = "./copernicus-core" }
 tiling = { path = "./tiling" }
-convection_types = { path = "./convection_types" }
+convection-types = { path = "./convection-types" }
 wgpu = { version = "30", default-features = false, features = [
     "std",
     "serde",

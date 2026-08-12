@@ -8,7 +8,7 @@ image.workspace = true
 anyhow.workspace = true
 reqwest = { workspace = true, features = ["blocking"], optional = true }
 copernicus-core = { workspace = true, optional = true }
-convection_types.workspace = true
+convection-types.workspace = true
 
 [features]
 default-features = ["osm", "copernicus"]
