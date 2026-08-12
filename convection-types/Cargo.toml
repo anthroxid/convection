@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 serde.workspace = true
 ndarray.workspace = true
+glam.workspace = true
