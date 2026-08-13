@@ -130,7 +130,7 @@ impl Default for WebMercatorScheme {
 
 impl TilingScheme for WebMercatorScheme {
     fn id(&self) -> &'static str {
-        "GoogleMapsCompatible"
+        "WebMercator"
     }
 
     fn tile_size(&self) -> u32 {
