@@ -53,16 +53,16 @@ impl SentinelHubTileFactory {
 impl TileFactory for SentinelHubTileFactory {
     type Scheme = Wgs84Scheme;
 
-    // TODO: stabilize API in trait so this isn't necessary
+    /// cannot be constructed this way, use `true_color_s2` constructor instead
     fn new() -> Self {
-        panic!(
+        unimplemented!(
             "SentinelHubTileFactory cannot be constructed this way, use `true_color_s2` instead"
         );
     }
 
-    // TODO: stabilize API in trait so this isn't necessary
+    /// cannot be constructed this way, use `true_color_s2` constructor instead
     fn with_scheme(_scheme: Self::Scheme) -> Self {
-        panic!(
+        unimplemented!(
             "SentinelHubTileFactory cannot be constructed this way, use `true_color_s2` instead"
         );
     }
