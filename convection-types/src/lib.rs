@@ -11,9 +11,11 @@ pub const EARTH_MEAN_RADIUS: Distance =
     Distance::meters(EARTH_CIRCUMFERENCE.as_meters() / (2. * PI));
 
 mod bbox;
+mod camera;
 mod distance;
 
 pub use bbox::*;
+pub use camera::*;
 pub use distance::*;
 use glam::DVec3;
 
@@ -53,16 +55,12 @@ impl Globe {
     pub fn normal_at(&self, lon_deg: f64, lat_deg: f64) -> DVec3 {
         self.lonlat_to_point(lon_deg, lat_deg).normalize()
     }
-}
 
-pub struct Camera {
-    pub position: DVec3,
-    pub fov_y_rad: f64,
-    pub viewport_height_px: u32,
-}
-
-impl Camera {
-    pub fn altitude(&self, globe: &Globe) -> Distance {
-        Distance::meters(self.position.length()) - globe.radius
+    /// whether a point on the surface faces an eye above the surface, i.e. is
+    /// on the near side of the horizon circle. points on the sphere satisfy
+    /// `dot(point, eye) == radius^2` exactly on the horizon
+    pub fn is_above_horizon(&self, point: DVec3, eye: DVec3) -> bool {
+        let r = self.radius.as_meters();
+        point.dot(eye) >= r * r
     }
 }

@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod factory;
+pub mod geometry;
 pub mod lod;
 pub mod tile;
 
