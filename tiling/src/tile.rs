@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use convection_types::{BBox, Distance};
+use convection_types::BBox;
 use image::RgbaImage;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,6 +64,20 @@ impl Tile {
             Some(Tile::new(self.zoom - 1, self.x / 2, self.y / 2))
         }
     }
+
+    /// offset in the ancestor's tile
+    pub fn offset_in(&self, ancestor: Tile) -> Option<(u32, u32, u32)> {
+        let levels = self.zoom.checked_sub(ancestor.zoom)?;
+        if levels >= u32::BITS {
+            return None;
+        }
+        let span = 1u32 << levels;
+        let (x, y) = (
+            self.x.checked_sub(ancestor.x.checked_mul(span)?)?,
+            self.y.checked_sub(ancestor.y.checked_mul(span)?)?,
+        );
+        (x < span && y < span).then_some((x, y, span))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -109,11 +123,6 @@ pub trait TilingScheme {
         (0..rows)
             .flat_map(|y| (0..cols).map(move |x| Tile::new(0, x, y)))
             .collect()
-    }
-
-    fn approx_tile_size(&self, zoom: u32) -> Distance {
-        let (cols, _) = self.matrix_dims(zoom);
-        convection_types::EARTH_CIRCUMFERENCE / cols as f64
     }
 }
 
@@ -217,5 +226,79 @@ impl TilingScheme for Wgs84Scheme {
         let north = 90.0 - tile.y() as f64 / rows as f64 * 180.0;
         let south = 90.0 - (tile.y() as f64 + 1.0) / rows as f64 * 180.0;
         BBox::new(west, south, east, north)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn children_and_parent_round_trip() {
+        let tile = Tile::new(3, 5, 2);
+        for child in tile.children() {
+            assert_eq!(child.zoom(), 4);
+            assert_eq!(child.parent(), Some(tile));
+        }
+        assert_eq!(Tile::new(0, 0, 0).parent(), None);
+    }
+
+    #[test]
+    fn offset_locates_a_tile_within_its_ancestor() {
+        let ancestor = Tile::new(2, 1, 1);
+        assert_eq!(ancestor.offset_in(ancestor), Some((0, 0, 1)));
+
+        // the ancestor's own quadrant, two levels down: 4x4 tiles starting at (4, 4)
+        assert_eq!(Tile::new(4, 4, 4).offset_in(ancestor), Some((0, 0, 4)));
+        assert_eq!(Tile::new(4, 7, 5).offset_in(ancestor), Some((3, 1, 4)));
+
+        // outside the ancestor's footprint, or above it
+        assert_eq!(Tile::new(4, 8, 4).offset_in(ancestor), None);
+        assert_eq!(Tile::new(1, 0, 0).offset_in(ancestor), None);
+    }
+
+    #[test]
+    fn web_mercator_lonlat_round_trips_through_bounds() {
+        let scheme = WebMercatorScheme::default();
+        for (lon, lat) in [(0.0, 0.0), (11.42, 47.27), (-122.4, 37.8), (179.9, -60.0)] {
+            for zoom in [0, 4, 12] {
+                let tile = scheme.tile_for_lonlat(lon, lat, zoom);
+                assert!(tile.is_valid_for(&scheme));
+                let b = scheme.bounds(tile);
+                assert!(b.west() <= lon && lon <= b.east(), "lon {lon} at z{zoom}");
+                assert!(b.south() <= lat && lat <= b.north(), "lat {lat} at z{zoom}");
+            }
+        }
+    }
+
+    #[test]
+    fn web_mercator_root_covers_the_world() {
+        let b = WebMercatorScheme::default().bounds(Tile::new(0, 0, 0));
+        assert!((b.west() - -180.0).abs() < 1e-9);
+        assert!((b.east() - 180.0).abs() < 1e-9);
+        assert!((b.north() - 85.051_128_78).abs() < 1e-6);
+        assert!((b.south() - -85.051_128_78).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wgs84_lonlat_round_trips_through_bounds() {
+        let scheme = Wgs84Scheme::default();
+        for (lon, lat) in [(0.0, 0.0), (11.42, 47.27), (-30.0, -89.0)] {
+            for zoom in [0, 3, 9] {
+                let tile = scheme.tile_for_lonlat(lon, lat, zoom);
+                assert!(tile.is_valid_for(&scheme));
+                let b = scheme.bounds(tile);
+                assert!(b.west() <= lon && lon <= b.east(), "lon {lon} at z{zoom}");
+                assert!(b.south() <= lat && lat <= b.north(), "lat {lat} at z{zoom}");
+            }
+        }
+    }
+
+    #[test]
+    fn flip_y_is_an_involution() {
+        let scheme = WebMercatorScheme::default();
+        let tile = Tile::new(4, 3, 11);
+        assert_eq!(tile.flip_y(&scheme).flip_y(&scheme), tile);
+        assert_eq!(tile.flip_y(&scheme), Tile::new(4, 3, 4));
     }
 }
