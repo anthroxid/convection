@@ -39,7 +39,7 @@ impl Default for Globe {
 }
 
 impl Globe {
-    /// point on the sphere for a given lon/lat, in degrees
+    /// point on the sphere for a given lon/lat, in degrees.
     pub fn lonlat_to_point(&self, lon_deg: f64, lat_deg: f64) -> DVec3 {
         let lon = lon_deg.to_radians();
         let lat = lat_deg.to_radians();
@@ -47,7 +47,7 @@ impl Globe {
         DVec3::new(
             r * lat.cos() * lon.cos(),
             r * lat.sin(),
-            r * lat.cos() * lon.sin(),
+            -r * lat.cos() * lon.sin(),
         )
     }
 
