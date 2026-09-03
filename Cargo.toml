@@ -47,6 +47,7 @@ reqwest = "0.13"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 glam = "0.33"
 typed-builder = "0.23"
+log = "0.4"
 
 [dependencies]
 render.workspace = true

@@ -12,6 +12,7 @@
 pub mod types;
 
 use anyhow::Result;
+use log::debug;
 use reqwest::Method;
 use std::sync::Arc;
 use types::{StacItem, StacItemCollection, StacSearchQuery};
@@ -73,6 +74,7 @@ impl CdseClient {
     /// search the STAC catalogue
     pub fn search_stac(&self, query: &StacSearchQuery) -> Result<StacItemCollection> {
         let url = format!("{}/search", self.stac_base.trim_end_matches('/'));
+        debug!("searching the stac catalogue at {url}");
         self.engine.json_request(Method::POST, &url, Some(query))
     }
 
@@ -84,6 +86,7 @@ impl CdseClient {
             collection,
             item_id
         );
+        debug!("fetching stac item {item_id} from collection {collection}");
         self.engine
             .json_request::<(), StacItem>(Method::GET, &url, None)
     }

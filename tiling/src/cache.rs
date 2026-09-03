@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 
 use image::ImageFormat;
+use log::{debug, trace, warn};
 
 use crate::{
     factory::{DummyTileFactory, TileFactory},
@@ -39,7 +40,9 @@ impl FsCache {
     /// create new fs cache using a root path as starting point,
     /// ensure the directory exists before using
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        debug!("tile cache rooted at {}", root.display());
+        Self { root }
     }
 
     /// cache under the system temp dir, e.g. /tmp/tile-cache on Linux
@@ -129,6 +132,10 @@ where
         self.inner.scheme()
     }
 
+    fn zoom_range(&self) -> std::ops::RangeInclusive<u32> {
+        self.inner.zoom_range()
+    }
+
     fn cache_namespace(&self) -> Option<String> {
         self.inner.cache_namespace()
     }
@@ -136,16 +143,31 @@ where
     fn rendered_tile(&self, tile: Tile) -> anyhow::Result<TileImage> {
         let key = self.key_for(tile);
 
-        if let Some(bytes) = self.cache.get(&key)? {
-            let image = image::load_from_memory(&bytes)?.into_rgba8();
-            return Ok(TileImage::new(tile, image));
+        match self.cache.get(&key) {
+            Ok(Some(bytes)) => match image::load_from_memory(&bytes) {
+                Ok(image) => {
+                    trace!("cache hit for {key} ({} bytes)", bytes.len());
+                    return Ok(TileImage::new(tile, image.into_rgba8()));
+                }
+                // a corrupt entry is not worth failing the tile over, the
+                // inner factory can produce it again
+                Err(err) => warn!("discarding unreadable cache entry {key}: {err}"),
+            },
+            Ok(None) => trace!("cache miss for {key}"),
+            // likewise, a cache that cannot be read is not a reason to give
+            // up on the tile itself
+            Err(err) => warn!("failed to read cache entry {key}: {err:#}"),
         }
 
         let tile_image = self.inner.rendered_tile(tile)?;
 
         let mut buf = std::io::Cursor::new(Vec::new());
         tile_image.image().write_to(&mut buf, ImageFormat::Png)?;
-        self.cache.put(&key, buf.get_ref())?;
+        if let Err(err) = self.cache.put(&key, buf.get_ref()) {
+            warn!("failed to cache {key}: {err:#}");
+        } else {
+            trace!("cached {key} ({} bytes)", buf.get_ref().len());
+        }
 
         Ok(tile_image)
     }

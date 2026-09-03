@@ -1,4 +1,7 @@
+use std::ops::RangeInclusive;
+
 use image::{Rgba, RgbaImage};
+use log::trace;
 
 use crate::tile::{Tile, TileImage, TilingScheme, WebMercatorScheme};
 
@@ -11,6 +14,10 @@ pub trait TileFactory {
     fn scheme(&self) -> &Self::Scheme;
     /// render a tile to a [`TileImage`] using [`Tile`] as a key
     fn rendered_tile(&self, tile: Tile) -> anyhow::Result<TileImage>;
+
+    fn zoom_range(&self) -> RangeInclusive<u32> {
+        0..=u32::MAX
+    }
 
     /// optional impl if you want to segregate the caches into separate namespaces
     /// see [`TileCache`] for more info
@@ -94,6 +101,7 @@ impl TileFactory for DummyTileFactory {
     }
 
     fn rendered_tile(&self, tile: Tile) -> anyhow::Result<TileImage> {
+        trace!("painting placeholder tile {tile}");
         Ok(TileImage::new(tile, self.tile_image(tile)))
     }
 }

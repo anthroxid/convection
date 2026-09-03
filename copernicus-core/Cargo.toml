@@ -12,3 +12,4 @@ anyhow.workspace = true
 reqwest = { workspace = true, features = ["blocking", "form", "json"] }
 eccodes.workspace = true
 convection-types.workspace = true
+log.workspace = true

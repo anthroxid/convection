@@ -1,6 +1,7 @@
 //! perspective camera and view-frustum geometry, in globe-centered meters
 
 use glam::{DMat4, DVec3, DVec4};
+use log::warn;
 use typed_builder::TypedBuilder;
 
 use crate::{Distance, Globe};
@@ -24,10 +25,15 @@ impl Camera {
     pub fn forward(&self) -> DVec3 {
         let d = self.target - self.position;
         if d.length_squared() > 0.0 {
-            d.normalize()
-        } else {
-            -DVec3::Z
+            return d.normalize();
         }
+        // a camera sitting on its own target has no view direction to derive,
+        // and every matrix built from it would be degenerate
+        warn!(
+            "camera at {:?} is looking at its own position, falling back to -Z",
+            self.position
+        );
+        -DVec3::Z
     }
 
     pub fn aspect(&self) -> f64 {
