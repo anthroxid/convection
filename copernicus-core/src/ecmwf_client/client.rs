@@ -1,12 +1,13 @@
 use crate::ecmwf_client::types::{ECMWFFile, JobStatus, ProcessingJob, ProcessingJobStatus};
 use crate::{ApiKeyAuth, EngineConfig, HttpEngine};
 use anyhow::{Result, anyhow, bail};
+use log::{debug, error, info};
 use reqwest::Method;
 use serde::Serialize;
 use std::io::Write;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEBUG_COPERNICUS_API_KEY_ENV_VAR: &str = "LOCAL_DEBUG_COPERNICUS_API_KEY";
 
@@ -59,6 +60,7 @@ impl EcmwfClient {
         let retrieve_base = format!("{base}/retrieve/v1");
         let exec_url = format!("{retrieve_base}/processes/{dataset}/execution");
         let submit_body = serde_json::json!({ "inputs": request });
+        info!("submitting a processing job for dataset {dataset}");
         let job: ProcessingJob =
             self.engine
                 .json_request(Method::POST, &exec_url, Some(&submit_body))?;
@@ -70,7 +72,12 @@ impl EcmwfClient {
                     .map(|id| format!("{retrieve_base}/jobs/{id}"))
             })
             .ok_or_else(|| anyhow!("missing monitor link in job submission response"))?;
+        info!(
+            "job {} accepted, monitoring at {monitor_url}",
+            job.job_id.as_deref().unwrap_or("with no id"),
+        );
 
+        let submitted = Instant::now();
         let mut sleep = Duration::from_secs(1);
         let mut last_status: Option<JobStatus> = None;
         loop {
@@ -79,6 +86,11 @@ impl EcmwfClient {
                 self.engine
                     .json_request::<(), _>(Method::GET, &status_url, None)?;
             if last_status != Some(job_status.status) {
+                info!(
+                    "job is {:?} after {:?}",
+                    job_status.status,
+                    submitted.elapsed()
+                );
                 last_status = Some(job_status.status);
             }
             match job_status.status {
@@ -86,11 +98,19 @@ impl EcmwfClient {
                     let results_url = job_status.results_url().unwrap_or_else(|| {
                         format!("{}/results", monitor_url.trim_end_matches('/'))
                     });
+                    info!(
+                        "job finished after {:?}, fetching its result",
+                        submitted.elapsed()
+                    );
                     return self
                         .engine
                         .json_request::<(), _>(Method::GET, &results_url, None);
                 }
                 JobStatus::Accepted | JobStatus::Running => {
+                    debug!(
+                        "job still {:?}, polling again in {sleep:?}",
+                        job_status.status
+                    );
                     thread::sleep(sleep);
                     let next = Duration::from_secs_f64((sleep.as_secs_f64() * 1.5).max(1.0));
                     sleep = next.min(self.poll_sleep_max);
@@ -99,9 +119,17 @@ impl EcmwfClient {
                 | JobStatus::Rejected
                 | JobStatus::Dismissed
                 | JobStatus::Deleted => {
+                    error!(
+                        "job ended as {:?} after {:?}",
+                        job_status.status,
+                        submitted.elapsed()
+                    );
                     bail!("processing failed with status {:?}", job_status.status);
                 }
-                other => bail!("unknown processing status [{other:?}]"),
+                other => {
+                    error!("job reported the unknown status {other:?}");
+                    bail!("unknown processing status [{other:?}]")
+                }
             }
         }
     }
@@ -116,6 +144,11 @@ impl EcmwfClient {
     where
         W: Write,
     {
+        info!(
+            "downloading {} ({} bytes)",
+            file.location(),
+            file.file_size()
+        );
         self.engine
             .download(&file.location(), writer, Some(file.file_size()))
     }

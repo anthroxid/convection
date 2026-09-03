@@ -80,6 +80,13 @@ impl Tile {
     }
 }
 
+/// the conventional zoom/x/y notation, as used by tile URLs
+impl std::fmt::Display for Tile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}/{}", self.zoom, self.x, self.y)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TileImage {
     tile: Tile,
@@ -232,6 +239,11 @@ impl TilingScheme for Wgs84Scheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiles_display_as_zoom_x_y() {
+        assert_eq!(Tile::new(12, 2200, 1428).to_string(), "12/2200/1428");
+    }
 
     #[test]
     fn children_and_parent_round_trip() {

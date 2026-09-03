@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use log::{debug, trace, warn};
 use reqwest::blocking::{Client as HttpClient, RequestBuilder};
 use serde::Deserialize;
 use std::sync::Mutex;
@@ -35,6 +36,7 @@ impl ApiKeyAuth {
 
 impl AuthStrategy for ApiKeyAuth {
     fn apply(&self, req: RequestBuilder) -> Result<RequestBuilder> {
+        trace!("attaching api key via the {} header", self.header_name);
         Ok(req.header(self.header_name, self.key.trim()))
     }
 }
@@ -97,6 +99,11 @@ impl OAuth2ClientCredentials {
     }
 
     fn fetch_token(&self) -> Result<(String, Instant)> {
+        debug!(
+            "requesting an oauth2 token for client {} from {}",
+            self.client_id, self.token_url
+        );
+        let started = Instant::now();
         let resp = self
             .http
             .post(&self.token_url)
@@ -111,6 +118,10 @@ impl OAuth2ClientCredentials {
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if !status.is_success() {
+            warn!(
+                "oauth2 token request to {} failed: HTTP {status}",
+                self.token_url
+            );
             bail!("OAuth2 token request failed: HTTP {status}: {text}");
         }
 
@@ -119,6 +130,13 @@ impl OAuth2ClientCredentials {
 
         let lifetime = Duration::from_secs(token.expires_in).saturating_sub(self.refresh_margin);
         let expiry = Instant::now() + lifetime;
+        debug!(
+            "got an oauth2 token in {:?}, usable for {:?} ({}s lifetime less a {:?} margin)",
+            started.elapsed(),
+            lifetime,
+            token.expires_in,
+            self.refresh_margin,
+        );
         Ok((token.access_token, expiry))
     }
 
@@ -127,7 +145,14 @@ impl OAuth2ClientCredentials {
         if let Some((token, expiry)) = guard.as_ref()
             && Instant::now() < *expiry
         {
+            trace!(
+                "reusing the cached oauth2 token, good for another {:?}",
+                expiry.saturating_duration_since(Instant::now())
+            );
             return Ok(token.clone());
+        }
+        if guard.is_some() {
+            debug!("the cached oauth2 token has expired, fetching a new one");
         }
         let (token, expiry) = self.fetch_token()?;
         *guard = Some((token.clone(), expiry));

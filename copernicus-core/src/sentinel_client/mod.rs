@@ -4,6 +4,7 @@
 pub mod types;
 
 use anyhow::Result;
+use log::debug;
 use reqwest::Method;
 use serde_json::Value;
 use std::sync::Arc;
@@ -43,6 +44,10 @@ impl SentinelHubClient {
     /// `[CdseClient]`, so both clients share a single
     /// cached OAuth2 token instead of each fetching their own.
     pub fn from_engine(engine: HttpEngine) -> Self {
+        debug!(
+            "sentinel hub client: process at {DEFAULT_PROCESS_BASE}, \
+             catalog at {DEFAULT_CATALOG_BASE}"
+        );
         Self {
             engine,
             process_base: DEFAULT_PROCESS_BASE.to_string(),
@@ -68,12 +73,22 @@ impl SentinelHubClient {
     /// bytes (PNG by default, see [`ProcessRequest`]/`ProcessFormat` to
     /// request TIFF, etc.).
     pub fn process_image(&self, req: &ProcessRequest) -> Result<Vec<u8>> {
+        debug!(
+            "process request: {}x{} px of {}",
+            req.output.width,
+            req.output.height,
+            req.input
+                .data
+                .first()
+                .map_or("no data source", |source| source.ty.as_str()),
+        );
         self.engine.post_bytes(&self.process_base, req)
     }
 
     /// Search Sentinel Hub's STAC-compliant catalog
     pub fn search_catalog(&self, query: &CatalogSearchQuery) -> Result<Value> {
         let url = format!("{}/search", self.catalog_base.trim_end_matches('/'));
+        debug!("searching the sentinel hub catalog at {url}");
         self.engine.json_request(Method::POST, &url, Some(query))
     }
 }
