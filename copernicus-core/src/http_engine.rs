@@ -4,6 +4,7 @@
 
 use crate::auth::AuthStrategy;
 use anyhow::{Context, Result, bail};
+use log::{debug, trace, warn};
 use reqwest::blocking::{Client as HttpClient, Response};
 use reqwest::header::{HeaderMap, HeaderValue, RANGE, USER_AGENT};
 use reqwest::{Method, StatusCode};
@@ -12,7 +13,7 @@ use serde::de::DeserializeOwned;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -71,6 +72,13 @@ impl HttpEngine {
             .danger_accept_invalid_certs(!config.verify_tls)
             .build()
             .context("failed to build HTTP client")?;
+        debug!(
+            "http engine: {:?} timeout, up to {} attempts {:?} apart, tls verification {}",
+            config.timeout,
+            config.retry_max.max(1),
+            config.retry_delay,
+            if config.verify_tls { "on" } else { "OFF" },
+        );
         Ok(Self {
             http,
             auth,
@@ -100,6 +108,8 @@ impl HttpEngine {
         Req: Serialize,
         Res: DeserializeOwned,
     {
+        debug!("{method} {url}");
+        let started = Instant::now();
         let resp = self.retried(|| {
             let mut req = self.http.request(method.clone(), url);
             req = self.auth.apply(req)?;
@@ -113,7 +123,13 @@ impl HttpEngine {
 
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
+        trace!(
+            "{method} {url}: HTTP {status}, {} bytes of JSON in {:?}",
+            text.len(),
+            started.elapsed(),
+        );
         if !status.is_success() {
+            warn!("{method} {url} failed: HTTP {status}: {text}");
             bail!("API request failed: HTTP {status} for url ({url}): {text}");
         }
         serde_json::from_str(&text).with_context(|| {
@@ -123,32 +139,59 @@ impl HttpEngine {
 
     /// GET raw bytes without assuming a JSON body (e.g. WMTS/WMS tiles)
     pub fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        debug!("GET {url}");
+        let started = Instant::now();
         let resp = self.retried(|| {
             let mut req = self.http.get(url);
             req = self.auth.apply(req)?;
             req.send().map_err(Into::into)
         })?;
-        let resp = resp.error_for_status().context("GET request failed")?;
-        Ok(resp
+        let resp = Self::checked(resp, "GET", url)?;
+        let bytes = resp
             .bytes()
             .context("failed to read response body")?
-            .to_vec())
+            .to_vec();
+        trace!(
+            "GET {url}: {} bytes in {:?}",
+            bytes.len(),
+            started.elapsed()
+        );
+        Ok(bytes)
     }
 
     /// POST a JSON body and return the raw response bytes (e.g. the
     /// Sentinel Hub Process API, which takes a JSON request and returns an
     /// image in the format requested by the `output.responses` field).
     pub fn post_bytes<Req: Serialize>(&self, url: &str, body: &Req) -> Result<Vec<u8>> {
+        debug!("POST {url}");
+        let started = Instant::now();
         let resp = self.retried(|| {
             let mut req = self.http.post(url).json(body);
             req = self.auth.apply(req)?;
             req.send().map_err(Into::into)
         })?;
-        let resp = resp.error_for_status().context("POST request failed")?;
-        Ok(resp
+        let resp = Self::checked(resp, "POST", url)?;
+        let bytes = resp
             .bytes()
             .context("failed to read response body")?
-            .to_vec())
+            .to_vec();
+        trace!(
+            "POST {url}: {} bytes in {:?}",
+            bytes.len(),
+            started.elapsed()
+        );
+        Ok(bytes)
+    }
+
+    /// turn an error status into an error, reporting the body that came with it
+    fn checked(resp: Response, method: &str, url: &str) -> Result<Response> {
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp);
+        }
+        let body = resp.text().unwrap_or_default();
+        warn!("{method} {url} failed: HTTP {status}: {body}");
+        bail!("{method} request failed: HTTP {status} for url ({url}): {body}")
     }
 
     /// Stream a download to `writer`, resuming via `Range` on transient
@@ -164,10 +207,16 @@ impl HttpEngine {
     ) -> Result<u64> {
         let mut downloaded: u64 = 0;
         let mut tries = 0usize;
+        let started = Instant::now();
+        match expected_size {
+            Some(size) => debug!("downloading {url} ({size} bytes)"),
+            None => debug!("downloading {url} (size unknown)"),
+        }
 
         'download_attempt: while tries < self.retry_max {
             let mut headers = HeaderMap::new();
             if downloaded > 0 {
+                debug!("resuming {url} at byte {downloaded}");
                 headers.insert(
                     RANGE,
                     HeaderValue::from_str(&format!("bytes={downloaded}-"))?,
@@ -193,6 +242,11 @@ impl HttpEngine {
                         if tries >= self.retry_max {
                             return Err(e).context("download interrupted");
                         }
+                        warn!(
+                            "download of {url} interrupted after {downloaded} bytes \
+                             (attempt {tries} of {}): {e}",
+                            self.retry_max
+                        );
                         writer.flush().ok();
                         thread::sleep(self.retry_delay);
                         continue 'download_attempt;
@@ -204,10 +258,21 @@ impl HttpEngine {
             match expected_size {
                 Some(size) if downloaded < size => {
                     tries += 1;
+                    warn!(
+                        "{url} ended short at {downloaded} of {size} bytes \
+                         (attempt {tries} of {}), retrying",
+                        self.retry_max
+                    );
                     thread::sleep(self.retry_delay);
                     continue;
                 }
-                _ => return Ok(downloaded),
+                _ => {
+                    debug!(
+                        "downloaded {downloaded} bytes from {url} in {:?}",
+                        started.elapsed()
+                    );
+                    return Ok(downloaded);
+                }
             }
         }
         bail!("download failed: downloaded {downloaded} byte(s), retries exhausted");
@@ -226,8 +291,19 @@ impl HttpEngine {
                     if is_status_retriable(resp.status()) {
                         tries += 1;
                         if tries >= self.retry_max {
+                            warn!(
+                                "giving up after {tries} attempts, last status was HTTP {}",
+                                resp.status()
+                            );
                             return Ok(resp);
                         }
+                        // to not make the user think this is a hang
+                        warn!(
+                            "HTTP {} is retriable, attempt {tries} of {}, waiting {:?}",
+                            resp.status(),
+                            self.retry_max,
+                            self.retry_delay,
+                        );
                         thread::sleep(self.retry_delay);
                         continue;
                     }
@@ -236,8 +312,16 @@ impl HttpEngine {
                 Err(err) => {
                     tries += 1;
                     if tries >= self.retry_max {
+                        warn!(
+                            "request failed on attempt {tries} of {}: {err:#}",
+                            self.retry_max
+                        );
                         return Err(err).context("request failed after retries");
                     }
+                    warn!(
+                        "request failed, attempt {tries} of {}, waiting {:?}: {err:#}",
+                        self.retry_max, self.retry_delay,
+                    );
                     thread::sleep(self.retry_delay);
                 }
             }

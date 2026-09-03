@@ -88,6 +88,28 @@ impl TilePatch {
     }
 }
 
+/// the deepest zoom a scheme can express before its matrix dimensions
+/// overflow
+const MAX_REPRESENTABLE_ZOOM: u32 = 30;
+
+/// the shallowest zoom whose tiles hold at most `max_m_per_px` ground meters
+/// per texel.
+///
+/// sources are usually limited in how coarse a request they will serve, and a
+/// tile's resolution only depends on its zoom and the scheme's tile size, so
+/// that limit translates directly into a shallowest usable zoom. measured on
+/// an equatorial tile, the largest of its level on either scheme
+pub fn zoom_for_resolution(scheme: &impl TilingScheme, globe: &Globe, max_m_per_px: f64) -> u32 {
+    let tile_px = scheme.tile_size().max(1) as f64;
+    (0..=MAX_REPRESENTABLE_ZOOM)
+        .find(|zoom| {
+            let tile = scheme.tile_for_lonlat(0.0, 0.0, *zoom);
+            let extent = TilePatch::new(scheme, tile, globe).extent().as_meters();
+            extent / tile_px <= max_m_per_px
+        })
+        .unwrap_or(MAX_REPRESENTABLE_ZOOM)
+}
+
 /// (lon, lat) in degrees of a direction
 fn to_lonlat(point: DVec3) -> (f64, f64) {
     let length = point.length();

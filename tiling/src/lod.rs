@@ -2,14 +2,17 @@
 
 use std::{
     collections::HashMap,
+    ops::RangeInclusive,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, Sender},
     },
+    time::Instant,
 };
 
 use convection_types::{Camera, Frustum, Globe};
+use log::{debug, info, log_enabled, trace, warn};
 use typed_builder::TypedBuilder;
 
 use crate::{
@@ -271,6 +274,30 @@ impl Cache {
     }
 }
 
+/// a source that cannot render a level at all, like an imagery API with a
+/// resolution limit, would otherwise be asked for tiles it can only reject
+fn narrow_to_source(config: LodConfig, serves: RangeInclusive<u32>, scheme_id: &str) -> LodConfig {
+    let min_zoom = config.min_zoom.max(*serves.start());
+    let max_zoom = config.max_zoom.min(*serves.end()).max(min_zoom);
+
+    if (min_zoom, max_zoom) != (config.min_zoom, config.max_zoom) {
+        info!(
+            "the {scheme_id} source serves zoom {}..={}, drawing {min_zoom}..={max_zoom} rather \
+             than the configured {}..={}",
+            serves.start(),
+            serves.end(),
+            config.min_zoom,
+            config.max_zoom,
+        );
+    }
+
+    LodConfig {
+        min_zoom,
+        max_zoom,
+        ..config
+    }
+}
+
 /// counters describing the last [`LodTileManager::update`]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LodStats {
@@ -287,12 +314,29 @@ pub struct LodTileManager<F: TileFactory + Send + Sync + 'static> {
     cache: Mutex<Cache>,
     frame: AtomicU64,
     stats: Mutex<LodStats>,
+    /// the deepest zoom drawn when it was last logged, so that a settled view
+    /// stays quiet and only changes in refinement get reported
+    logged_deepest_zoom: Mutex<Option<u32>>,
+    /// whether the cache has already been reported as too small for the view
+    warned_over_capacity: AtomicBool,
     result_tx: Sender<(Tile, Option<Arc<TileImage>>)>,
     result_rx: Mutex<Receiver<(Tile, Option<Arc<TileImage>>)>>,
 }
 
 impl<F: TileFactory + Send + Sync + 'static> LodTileManager<F> {
     pub fn new(factory: F, config: LodConfig) -> Self {
+        let config = narrow_to_source(config, factory.zoom_range(), factory.scheme().id());
+        debug!(
+            "lod manager for scheme {} ({} px tiles): zoom {}..={}, {:.1} px error, \
+             {} concurrent loads, {} tile cache",
+            factory.scheme().id(),
+            factory.scheme().tile_size(),
+            config.min_zoom,
+            config.max_zoom,
+            config.target_pixel_error,
+            config.max_concurrent_loads,
+            config.cache_capacity,
+        );
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         Self {
             factory: Arc::new(factory),
@@ -300,6 +344,8 @@ impl<F: TileFactory + Send + Sync + 'static> LodTileManager<F> {
             cache: Mutex::new(Cache::default()),
             frame: AtomicU64::new(0),
             stats: Mutex::new(LodStats::default()),
+            logged_deepest_zoom: Mutex::new(None),
+            warned_over_capacity: AtomicBool::new(false),
             result_tx,
             result_rx: Mutex::new(result_rx),
         }
@@ -348,7 +394,7 @@ impl<F: TileFactory + Send + Sync + 'static> LodTileManager<F> {
         evict(&mut cache, self.config.cache_capacity, frame);
         let to_load = self.admit_loads(&mut cache, selection.wanted, frame);
 
-        *self.stats.lock().unwrap() = LodStats {
+        let stats = LodStats {
             drawn: drawn.len(),
             fallbacks: drawn
                 .iter()
@@ -357,12 +403,68 @@ impl<F: TileFactory + Send + Sync + 'static> LodTileManager<F> {
             loading: cache.inflight,
             cached: cache.slots.len(),
         };
+        *self.stats.lock().unwrap() = stats;
         drop(cache);
+
+        self.report_frame(frame, &drawn, &stats, camera, globe);
 
         for tile in to_load {
             self.spawn_load(tile);
         }
         drawn
+    }
+
+    /// per-frame reporting
+    fn report_frame(
+        &self,
+        frame: u64,
+        drawn: &[LodTile],
+        stats: &LodStats,
+        camera: &Camera,
+        globe: &Globe,
+    ) {
+        let deepest = drawn.iter().map(|drawn| drawn.tile.zoom()).max();
+        let coarsest = drawn.iter().map(|drawn| drawn.tile.zoom()).min();
+
+        if log_enabled!(log::Level::Trace) {
+            trace!(
+                "frame {frame}: drawn={} zoom={}..={} borrowed={} loading={} cached={} \
+                 altitude={:.0}",
+                stats.drawn,
+                coarsest.unwrap_or(0),
+                deepest.unwrap_or(0),
+                stats.fallbacks,
+                stats.loading,
+                stats.cached,
+                camera.altitude(globe),
+            );
+        }
+
+        let mut logged = self.logged_deepest_zoom.lock().unwrap();
+        if *logged != deepest {
+            debug!(
+                "frame {frame}: deepest zoom is now {} at {:.0} up, drawing {} tile(s), {} of \
+                 them borrowed from a coarser level, {} still loading",
+                deepest.map_or_else(|| "nothing".to_owned(), |zoom| zoom.to_string()),
+                camera.altitude(globe),
+                stats.drawn,
+                stats.fallbacks,
+                stats.loading,
+            );
+            *logged = deepest;
+        }
+
+        // a cache that cannot hold the working set makes the view fall back to
+        // coarser levels every frame, which is worth saying out loud once
+        if stats.cached > self.config.cache_capacity
+            && !self.warned_over_capacity.swap(true, Ordering::Relaxed)
+        {
+            warn!(
+                "tile cache holds {} tiles for a capacity of {}: the view needs more than it is \
+                 allowed to keep, so nothing can be evicted",
+                stats.cached, self.config.cache_capacity,
+            );
+        }
     }
 
     /// start loading as many of the wanted tiles as there are free load slots
@@ -401,6 +503,11 @@ impl<F: TileFactory + Send + Sync + 'static> LodTileManager<F> {
                 },
             );
             cache.inflight += 1;
+            if attempt > 1 {
+                debug!("retrying tile {tile}, attempt {attempt} of {MAX_LOAD_ATTEMPTS}");
+            } else {
+                trace!("loading tile {tile}");
+            }
             admitted.push(tile);
         }
         admitted
@@ -412,7 +519,26 @@ impl<F: TileFactory + Send + Sync + 'static> LodTileManager<F> {
         // FIXME: if removing max_concurrent_loads in the future, use a dynamic
         // thread pool instead
         std::thread::spawn(move || {
-            let image = factory.rendered_tile(tile).ok().map(Arc::new);
+            let started = Instant::now();
+            let image = match factory.rendered_tile(tile) {
+                Ok(image) => {
+                    let (width, height) = image.pixel_dimensions();
+                    trace!(
+                        "loaded tile {tile}: {width}x{height} px in {:?}",
+                        started.elapsed()
+                    );
+                    Some(Arc::new(image))
+                }
+                Err(err) => {
+                    // the cache only records that the load failed, so this is
+                    // the one place the reason can still be reported
+                    warn!(
+                        "tile {tile} failed to load after {:?}: {err:#}",
+                        started.elapsed()
+                    );
+                    None
+                }
+            };
             let _ = tx.send((tile, image));
         });
     }
@@ -427,10 +553,18 @@ impl<F: TileFactory + Send + Sync + 'static> LodTileManager<F> {
             };
             let entry = match image {
                 Some(image) => CacheEntry::Ready(image),
-                None => CacheEntry::Failed {
-                    attempts,
-                    since_frame: frame,
-                },
+                None => {
+                    if attempts >= MAX_LOAD_ATTEMPTS {
+                        warn!(
+                            "giving up on tile {tile} after {attempts} attempts, a coarser \
+                             level will stand in for it"
+                        );
+                    }
+                    CacheEntry::Failed {
+                        attempts,
+                        since_frame: frame,
+                    }
+                }
             };
             cache.slots.insert(
                 tile,
@@ -473,6 +607,7 @@ fn resolve_source(cache: &mut Cache, tile: Tile, frame: u64) -> LodTileSource {
         };
     }
 
+    trace!("tile {tile} has no loaded ancestor to borrow from yet");
     LodTileSource::None
 }
 
@@ -483,6 +618,7 @@ fn evict(cache: &mut Cache, capacity: usize, frame: u64) {
     if cache.slots.len() <= capacity {
         return;
     }
+    let before = cache.slots.len();
 
     let mut evictable: Vec<(Tile, u64)> = cache
         .slots
@@ -498,8 +634,15 @@ fn evict(cache: &mut Cache, capacity: usize, frame: u64) {
         if cache.slots.len() <= capacity {
             break;
         }
+        trace!("evicting tile {tile}");
         cache.slots.remove(&tile);
     }
+
+    trace!(
+        "evicted {} of {before} tiles, {} left for a capacity of {capacity}",
+        before - cache.slots.len(),
+        cache.slots.len(),
+    );
 }
 
 #[cfg(test)]
@@ -741,6 +884,13 @@ mod tests {
         );
     }
 
+    /// route the library's logging into the test output, so that
+    /// `RUST_LOG=trace cargo test -p tiling -- --nocapture` can be used to
+    /// follow what the manager is doing
+    fn init_logging() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
     fn ready_slot(tile: Tile) -> CacheSlot {
         CacheSlot {
             entry: CacheEntry::Ready(Arc::new(TileImage::new(tile, RgbaImage::new(4, 4)))),
@@ -876,6 +1026,7 @@ mod tests {
 
     #[test]
     fn the_manager_fills_the_pyramid_in_over_frames() {
+        init_logging();
         let globe = Globe::earth();
         let camera = camera_over(&globe, 11.42, 47.27, 2_000_000.0);
         let manager = LodTileManager::new(
@@ -959,6 +1110,7 @@ mod tests {
 
     #[test]
     fn a_gap_in_the_source_does_not_hold_back_its_neighbours() {
+        init_logging();
         let globe = Globe::earth();
         let camera = camera_over(&globe, 11.42, 47.27, 2_000_000.0);
         let manager = LodTileManager::new(
@@ -1008,6 +1160,7 @@ mod tests {
 
     #[test]
     fn a_settled_view_does_not_oscillate_between_levels() {
+        init_logging();
         let globe = Globe::earth();
         let camera = camera_over(&globe, 11.42, 47.27, 40_000.0);
         let manager = LodTileManager::new(
@@ -1036,6 +1189,85 @@ mod tests {
             settled.iter().all(|zoom| *zoom == 12),
             "levels kept changing: {settled:?}"
         );
+    }
+
+    /// a source that publishes only a slice, the way an
+    /// imagery api with a resolution limit does
+    struct LimitedTileFactory {
+        scheme: WebMercatorScheme,
+    }
+
+    impl LimitedTileFactory {
+        const SERVES: RangeInclusive<u32> = 3..=5;
+    }
+
+    impl TileFactory for LimitedTileFactory {
+        type Scheme = WebMercatorScheme;
+
+        fn new() -> Self {
+            Self::with_scheme(WebMercatorScheme::default())
+        }
+
+        fn with_scheme(scheme: Self::Scheme) -> Self {
+            Self { scheme }
+        }
+
+        fn scheme(&self) -> &Self::Scheme {
+            &self.scheme
+        }
+
+        fn zoom_range(&self) -> RangeInclusive<u32> {
+            Self::SERVES
+        }
+
+        fn rendered_tile(&self, tile: Tile) -> anyhow::Result<TileImage> {
+            assert!(
+                Self::SERVES.contains(&tile.zoom()),
+                "{tile} is outside what this source serves"
+            );
+            let size = self.scheme.tile_size();
+            Ok(TileImage::new(tile, RgbaImage::new(size, size)))
+        }
+    }
+
+    #[test]
+    fn the_configured_zoom_range_is_held_to_what_the_source_serves() {
+        let manager = LodTileManager::new(LimitedTileFactory::new(), LodConfig::default());
+        assert_eq!(manager.config().min_zoom, 3);
+        assert_eq!(manager.config().max_zoom, 5);
+    }
+
+    #[test]
+    fn a_source_with_a_resolution_limit_is_never_asked_for_coarser_tiles() {
+        init_logging();
+        let globe = Globe::earth();
+        let manager = LodTileManager::new(LimitedTileFactory::new(), LodConfig::default());
+
+        // from the coarsest view, where the error target alone would settle
+        // for a single root tile, down to one far deeper than the source goes
+        for altitude in [20_000_000.0, 500_000.0, 5_000.0] {
+            let camera = camera_over(&globe, 11.42, 47.27, altitude);
+            for _ in 0..300 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                let drawn = manager.update(&camera, &globe);
+                // the factory itself panics on an out of range request, so
+                // reaching here at all means none were made
+                for drawn in &drawn {
+                    assert!(
+                        LimitedTileFactory::SERVES.contains(&drawn.tile.zoom()),
+                        "{} was drawn at {altitude} m",
+                        drawn.tile
+                    );
+                }
+                if manager.stats().loading == 0
+                    && drawn
+                        .iter()
+                        .all(|drawn| matches!(drawn.source, LodTileSource::Exact(_)))
+                {
+                    break;
+                }
+            }
+        }
     }
 
     #[test]
