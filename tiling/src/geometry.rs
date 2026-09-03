@@ -110,14 +110,15 @@ pub fn zoom_for_resolution(scheme: &impl TilingScheme, globe: &Globe, max_m_per_
         .unwrap_or(MAX_REPRESENTABLE_ZOOM)
 }
 
-/// (lon, lat) in degrees of a direction
+/// (lon, lat) in degrees of a direction, the inverse of
+/// [`Globe::lonlat_to_point`], whose longitude grows towards -Z
 fn to_lonlat(point: DVec3) -> (f64, f64) {
     let length = point.length();
     if length == 0.0 {
         return (0.0, 0.0);
     }
     (
-        point.z.atan2(point.x).to_degrees(),
+        (-point.z).atan2(point.x).to_degrees(),
         (point.y / length).clamp(-1.0, 1.0).asin().to_degrees(),
     )
 }
